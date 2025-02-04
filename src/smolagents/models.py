@@ -241,8 +241,6 @@ class Model:
     def __init__(self, **kwargs):
         self.last_input_token_count = None
         self.last_output_token_count = None
-        # Set default values for common parameters
-        kwargs.setdefault("max_tokens", 4096)
         self.kwargs = kwargs
 
     def _prepare_completion_kwargs(
@@ -643,15 +641,19 @@ class LiteLLMModel(Model):
             The base URL of the OpenAI-compatible API server.
         api_key (`str`, *optional*):
             The API key to use for authentication.
+        custom_role_conversions (`dict[str, str]`, *optional*):
+            Custom role conversion mapping to convert message roles in others.
+            Useful for specific models that do not support specific message roles like "system".
         **kwargs:
             Additional keyword arguments to pass to the OpenAI API.
     """
 
     def __init__(
         self,
-        model_id="anthropic/claude-3-5-sonnet-20240620",
+        model_id: str = "anthropic/claude-3-5-sonnet-20240620",
         api_base=None,
         api_key=None,
+        custom_role_conversions: Optional[Dict[str, str]] = None,
         **kwargs,
     ):
         try:
@@ -667,6 +669,7 @@ class LiteLLMModel(Model):
         litellm.add_function_to_prompt = True
         self.api_base = api_base
         self.api_key = api_key
+        self.custom_role_conversions = custom_role_conversions
 
     def __call__(
         self,
@@ -687,6 +690,8 @@ class LiteLLMModel(Model):
             api_base=self.api_base,
             api_key=self.api_key,
             convert_images_to_image_urls=True,
+            flatten_messages_as_text=self.model_id.startswith("ollama"),
+            custom_role_conversions=self.custom_role_conversions,
             **kwargs,
         )
 

@@ -5,19 +5,19 @@
 In this notebook, we'll create an **agent-powered web browser automation system**! This system can navigate websites, interact with elements, and extract information automatically.
 
 The agent will be able to:
-✅ Navigate to web pages
-✅ Click on elements
-✅ Search within pages
-✅ Handle popups and modals
-✅ Take screenshots
-✅ Extract information
 
-Let's set up this system step by step.
+- [x] Navigate to web pages
+- [x] Click on elements
+- [x] Search within pages
+- [x] Handle popups and modals
+- [x] Extract information
+
+Let's set up this system step by step!
 
 First, run these lines to install the required dependencies:
 
 ```bash
-pip install smolagents selenium helium pillow python-dotenv -q
+pip install smolagents selenium helium pillow -q
 ```
 
 Let's import our required libraries and set up environment variables:
@@ -209,10 +209,3 @@ The system is particularly effective for tasks like:
 - Web research automation
 - UI testing and verification
 - Content monitoring
-
-Best Practices:
-1. Always provide clear, specific instructions
-2. Use the screenshot callback for debugging
-3. Handle errors gracefully
-4. Clean up old screenshots to manage memory
-5. Set reasonable step limits for your tasks

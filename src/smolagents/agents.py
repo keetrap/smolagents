@@ -140,6 +140,9 @@ class MultiStepAgent:
         managed_agents (`list`, *optional*): Managed agents that the agent can call.
         step_callbacks (`list[Callable]`, *optional*): Callbacks that will be called at each step.
         planning_interval (`int`, *optional*): Interval at which the agent will run a planning step.
+        name (`str`, *optional*): Necessary for a managed agent only - the name by which this agent can be called.
+        description (`str`, *optional*): Necessary for a managed agent only - the description of this agent.
+        managed_agent_prompt (`str`, *optional*): Custom prompt for the managed agent. Defaults to None.
     """
 
     def __init__(
@@ -156,6 +159,9 @@ class MultiStepAgent:
         managed_agents: Optional[List] = None,
         step_callbacks: Optional[List[Callable]] = None,
         planning_interval: Optional[int] = None,
+        name: Optional[str] = None,
+        description: Optional[str] = None,
+        managed_agent_prompt: Optional[str] = None,
     ):
         if system_prompt is None:
             system_prompt = CODE_SYSTEM_PROMPT
@@ -172,9 +178,16 @@ class MultiStepAgent:
         self.grammar = grammar
         self.planning_interval = planning_interval
         self.state = {}
+        self.name = name
+        self.description = description
+        self.managed_agent_prompt = managed_agent_prompt if managed_agent_prompt else MANAGED_AGENT_PROMPT
 
         self.managed_agents = {}
         if managed_agents is not None:
+            for managed_agent in managed_agents:
+                assert managed_agent.name and managed_agent.description, (
+                    "All managed agents need both a name and a description!"
+                )
             self.managed_agents = {agent.name: agent for agent in managed_agents}
 
         for tool in tools:
@@ -224,6 +237,10 @@ class MultiStepAgent:
         for memory_step in self.memory.steps:
             messages.extend(memory_step.to_messages(summary_mode=summary_mode))
         return messages
+
+    def visualize(self):
+        """Creates a rich tree visualization of the agent's structure."""
+        self.logger.visualize_agent_tree(self)
 
     def extract_action(self, model_output: str, split_token: str) -> Tuple[str, str]:
         """
@@ -634,6 +651,22 @@ Now begin!""",
         """
         self.memory.replay(self.logger, detailed=detailed)
 
+    def __call__(self, request, provide_run_summary=False, **kwargs):
+        """Adds additional prompting for the managed agent, and runs it."""
+        full_task = self.managed_agent_prompt.format(name=self.name, task=request).strip()
+        output = self.run(full_task, **kwargs)
+        if provide_run_summary:
+            answer = f"Here is the final answer from your managed agent '{self.name}':\n"
+            answer += str(output)
+            answer += f"\n\nFor more detail, find below a summary of this agent's work:\nSUMMARY OF WORK FROM AGENT '{self.name}':\n"
+            for message in self.write_memory_to_messages(summary_mode=True):
+                content = message["content"]
+                answer += "\n" + truncate_content(str(content)) + "\n---"
+            answer += f"\nEND OF SUMMARY OF WORK FROM AGENT '{self.name}'."
+            return answer
+        else:
+            return output
+
 
 class ToolCallingAgent(MultiStepAgent):
     """
@@ -892,7 +925,7 @@ class CodeAgent(MultiStepAgent):
                 ]
             observation = "Execution logs:\n" + execution_logs
         except Exception as e:
-            if "print_outputs" in self.python_executor.state:
+            if hasattr(self.python_executor, "state") and "print_outputs" in self.python_executor.state:
                 execution_logs = self.python_executor.state["print_outputs"]
                 if len(execution_logs) > 0:
                     execution_outputs_console = [
@@ -924,59 +957,4 @@ class CodeAgent(MultiStepAgent):
         return output if is_final_answer else None
 
 
-class ManagedAgent:
-    """
-    ManagedAgent class that manages an agent and provides additional prompting and run summaries.
-
-    Args:
-        agent (`object`): The agent to be managed.
-        name (`str`): The name of the managed agent.
-        description (`str`): A description of the managed agent.
-        additional_prompting (`Optional[str]`, *optional*): Additional prompting for the managed agent. Defaults to None.
-        provide_run_summary (`bool`, *optional*): Whether to provide a run summary after the agent completes its task. Defaults to False.
-        managed_agent_prompt (`Optional[str]`, *optional*): Custom prompt for the managed agent. Defaults to None.
-
-    """
-
-    def __init__(
-        self,
-        agent,
-        name,
-        description,
-        additional_prompting: Optional[str] = None,
-        provide_run_summary: bool = False,
-        managed_agent_prompt: Optional[str] = None,
-    ):
-        self.agent = agent
-        self.name = name
-        self.description = description
-        self.additional_prompting = additional_prompting
-        self.provide_run_summary = provide_run_summary
-        self.managed_agent_prompt = managed_agent_prompt if managed_agent_prompt else MANAGED_AGENT_PROMPT
-
-    def write_full_task(self, task):
-        """Adds additional prompting for the managed agent, like 'add more detail in your answer'."""
-        full_task = self.managed_agent_prompt.format(name=self.name, task=task)
-        if self.additional_prompting:
-            full_task = full_task.replace("\n{additional_prompting}", self.additional_prompting).strip()
-        else:
-            full_task = full_task.replace("\n{additional_prompting}", "").strip()
-        return full_task
-
-    def __call__(self, request, **kwargs):
-        full_task = self.write_full_task(request)
-        output = self.agent.run(full_task, **kwargs)
-        if self.provide_run_summary:
-            answer = f"Here is the final answer from your managed agent '{self.name}':\n"
-            answer += str(output)
-            answer += f"\n\nFor more detail, find below a summary of this agent's work:\nSUMMARY OF WORK FROM AGENT '{self.name}':\n"
-            for message in self.agent.write_memory_to_messages(summary_mode=True):
-                content = message["content"]
-                answer += "\n" + truncate_content(str(content)) + "\n---"
-            answer += f"\nEND OF SUMMARY OF WORK FROM AGENT '{self.name}'."
-            return answer
-        else:
-            return output
-
-
-__all__ = ["ManagedAgent", "MultiStepAgent", "CodeAgent", "ToolCallingAgent", "AgentMemory"]
+__all__ = ["MultiStepAgent", "CodeAgent", "ToolCallingAgent", "AgentMemory"]
