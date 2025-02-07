@@ -667,6 +667,185 @@ Now begin!""",
         else:
             return output
 
+    def save(self, output_dir: str):
+        import inspect
+        import os
+        import re
+        import sys
+        import tempfile
+        import textwrap
+
+        from . import default_tools as df
+        from ._function_type_hints_utils import get_imports
+
+        def get_tool_code(tool):
+            with tempfile.TemporaryDirectory() as work_dir:
+                tool.save(work_dir)
+                tool_py_path = os.path.join(work_dir, "tool.py")
+                if os.path.exists(tool_py_path):
+                    with open(tool_py_path, "r") as file:
+                        return file.read()
+                return ""
+
+        os.makedirs(output_dir, exist_ok=True)
+        tools_file = os.path.join(output_dir, "tools.py")
+        app_file = os.path.join(output_dir, "app.py")
+        prompt_file = os.path.join(output_dir, "prompt.py")
+
+        default_imports = []
+        tools_list = []
+        tools_code = ""
+        managed_reqirements = set()
+        prompts = f'PROMPT="""{self.initialize_system_prompt()}"""'
+        managed_app = ""
+        managed_import = ""
+        managed_defination = ""
+        agent_defination = ""
+        default_import_names = ""
+
+        for key, tool in list(self.tools.items())[:-1]:
+            if tool.__class__.__name__ in [name for name, obj in inspect.getmembers(df, inspect.isclass)]:
+                default_imports.append(tool.__class__.__name__)
+                del self.tools[key]
+                continue
+            tools_code += get_tool_code(tool) + "\n"
+            tools_list.append(tool)
+
+        tool_import_names = ", ".join([tool.__class__.__name__ for tool in tools_list])
+        tool_class_names = ", ".join([tool.__class__.__name__ + "()" for tool in tools_list])
+
+        from_tools_import = "from tools import" if tool_import_names != "" else ""
+
+        if default_imports:
+            default_import_names = ", " + ", ".join(default_imports)
+            tool_class_names += (", " if tool_class_names else "") + ", ".join(
+                [tool + "()" for tool in default_imports]
+            )
+
+        for key, m_agent in list(self.managed_agents.items()):
+            with tempfile.TemporaryDirectory() as work_dir:
+                m_agent.save(work_dir)
+                tool_py_path = os.path.join(work_dir, "tools.py")
+                app_py_path = os.path.join(work_dir, "app.py")
+                prompt_py_path = os.path.join(work_dir, "prompt.py")
+                requirements_py_path = os.path.join(work_dir, "requirements.txt")
+
+                if os.path.exists(tool_py_path):
+                    with open(tool_py_path, "r") as file:
+                        tools_code += file.read() + "\n"
+
+                if os.path.exists(app_py_path):
+                    with open(app_py_path, "r") as file:
+                        updated_text = re.sub(r"(?<!\w)agent(?!\w)", key, file.read())
+                        updated_text = re.sub(r"GradioUI\(.+?\)\.launch\(\)\n", "", updated_text)
+                        updated_text = re.sub(r"GradioUI,", "", updated_text)
+                        updated_text = re.sub(r"PROMPT", f"PROMPT_{key}", updated_text)
+                        managed_app += updated_text + "\n"
+
+                if os.path.exists(prompt_py_path):
+                    with open(prompt_py_path, "r") as file:
+                        update_prompts = re.sub(r"(?<!\w)PROMPT(?!\w)", f"PROMPT_{key}", file.read())
+                        prompts += "\n" + update_prompts + "\n"
+
+                if os.path.exists(requirements_py_path):
+                    with open(requirements_py_path, "r") as f:
+                        managed_reqirements.update(f.read().splitlines())
+
+        if managed_app != "":
+            with open(os.path.join(output_dir, "managed_agents.py"), "w") as file:
+                file.write(managed_app)
+            managed_import = "from managed_agents import *"
+        managed_defination = f"""name={f"'{self.name}'" if self.name else "None"},
+                    description={f"'{self.description}'" if self.description else "None"},"""
+
+        managed_agents_list = f"[{', '.join(self.managed_agents.keys())}]" if self.managed_agents else None
+
+        with open(prompt_file, "w") as file:
+            file.write(prompts)
+
+        with open(tools_file, "w") as file:
+            file.write(tools_code)
+
+        imports = {el for el in get_imports(tools_file) if el not in sys.stdlib_module_names} | {"smolagents"}
+        imports = imports.union(managed_reqirements)
+        requirements_file = os.path.join(output_dir, "requirements.txt")
+        with open(requirements_file, "w", encoding="utf-8") as f:
+            f.write("\n".join(imports) + "\n")
+
+        if type(self).__name__ == "CodeAgent":
+            additional_authorized_imports = self.additional_authorized_imports
+            max_print_outputs_length = self.max_print_outputs_length
+            use_e2b_executor = self.use_e2b_executor
+
+            agent_defination = f"""additional_authorized_imports={additional_authorized_imports},
+                    use_e2b_executor={use_e2b_executor},
+                    max_print_output_length={max_print_outputs_length},"""
+
+        app_file_content = f"""
+        from smolagents import GradioUI, {type(self).__name__}{default_import_names}
+        from prompt import PROMPT
+        {from_tools_import} {tool_import_names}
+        from smolagents import {type(self.model).__name__}
+        {managed_import}
+        agent = {type(self).__name__}(
+                    tools=[{tool_class_names}],
+                    model={type(self.model).__name__}(),
+                    system_prompt=PROMPT,
+                    planning_interval={self.planning_interval},
+                    managed_agents= {managed_agents_list},
+                    max_steps={self.max_steps},
+                    verbosity_level={self.logger.level},
+                    grammar={self.grammar},
+                    {managed_defination}
+                    {agent_defination}
+                )
+        GradioUI(agent).launch()
+        """
+        app_file_content = textwrap.dedent(app_file_content).lstrip()
+        print(app_file_content)
+        with open(app_file, "w") as file:
+            file.write(app_file_content)
+
+
+    def push_to_hub(
+        self,
+        repo_id: str,
+        commit_message: str = "Upload Agent",
+        private: Optional[bool] = None,
+        token: Optional[Union[bool, str]] = None,
+        create_pr: bool = False,
+    ) -> str:
+        from huggingface_hub import (
+            create_repo,
+            metadata_update,
+            upload_folder,
+        )
+        import tempfile
+        import os
+ 
+        repo_url = create_repo(
+            repo_id=repo_id,
+            token=token,
+            private=private,
+            exist_ok=True,
+            repo_type="space",
+            space_sdk="gradio",
+        )
+        repo_id = repo_url.repo_id
+        metadata_update(repo_id, {"tags": ["tool"]}, repo_type="space", token=token)
+
+        with tempfile.TemporaryDirectory() as work_dir:
+            self.save(work_dir)
+            logger.info(f"Uploading the following files to {repo_id}: {','.join(os.listdir(work_dir))}")
+            return upload_folder(
+                repo_id=repo_id,
+                commit_message=commit_message,
+                folder_path=work_dir,
+                token=token,
+                create_pr=create_pr,
+                repo_type="space",
+            )
+
 
 class ToolCallingAgent(MultiStepAgent):
     """
@@ -816,6 +995,8 @@ class CodeAgent(MultiStepAgent):
             system_prompt = CODE_SYSTEM_PROMPT
 
         self.additional_authorized_imports = additional_authorized_imports if additional_authorized_imports else []
+        self.max_print_outputs_length = max_print_outputs_length
+        self.use_e2b_executor = use_e2b_executor
         self.authorized_imports = list(set(BASE_BUILTIN_MODULES) | set(self.additional_authorized_imports))
         if "{{authorized_imports}}" not in system_prompt:
             raise ValueError("Tag '{{authorized_imports}}' should be provided in the prompt.")
