@@ -22,10 +22,10 @@ import re
 import tempfile
 import textwrap
 import time
-from collections import Counter, deque
+from collections import deque
 from logging import getLogger
 from pathlib import Path
-from typing import Any, Callable, Dict, Generator, List, Optional, Set, Tuple, Union
+from typing import Any, Callable, Dict, Generator, List, Optional, Set, Tuple, TypedDict, Union
 
 import jinja2
 import yaml
@@ -87,6 +87,85 @@ def populate_template(template: str, variables: Dict[str, Any]) -> str:
         raise Exception(f"Error during jinja template rendering: {type(e).__name__}: {e}")
 
 
+class PlanningPromptTemplate(TypedDict):
+    """
+    Prompt templates for the planning step.
+
+    Args:
+        initial_facts (`str`): Initial facts prompt.
+        initial_plan (`str`): Initial plan prompt.
+        update_facts_pre_messages (`str`): Update facts pre-messages prompt.
+        update_facts_post_messages (`str`): Update facts post-messages prompt.
+        update_plan_pre_messages (`str`): Update plan pre-messages prompt.
+        update_plan_post_messages (`str`): Update plan post-messages prompt.
+    """
+
+    initial_facts: str
+    initial_plan: str
+    update_facts_pre_messages: str
+    update_facts_post_messages: str
+    update_plan_pre_messages: str
+    update_plan_post_messages: str
+
+
+class ManagedAgentPromptTemplate(TypedDict):
+    """
+    Prompt templates for the managed agent.
+
+    Args:
+        task (`str`): Task prompt.
+        report (`str`): Report prompt.
+    """
+
+    task: str
+    report: str
+
+
+class FinalAnswerPromptTemplate(TypedDict):
+    """
+    Prompt templates for the final answer.
+
+    Args:
+        pre_messages (`str`): Pre-messages prompt.
+        post_messages (`str`): Post-messages prompt.
+    """
+
+    pre_messages: str
+    post_messages: str
+
+
+class PromptTemplates(TypedDict):
+    """
+    Prompt templates for the agent.
+
+    Args:
+        system_prompt (`str`): System prompt.
+        planning ([`~agents.PlanningPromptTemplate`]): Planning prompt templates.
+        managed_agent ([`~agents.ManagedAgentPromptTemplate`]): Managed agent prompt templates.
+        final_answer ([`~agents.FinalAnswerPromptTemplate`]): Final answer prompt templates.
+    """
+
+    system_prompt: str
+    planning: PlanningPromptTemplate
+    managed_agent: ManagedAgentPromptTemplate
+    final_answer: FinalAnswerPromptTemplate
+
+
+EMPTY_PROMPT_TEMPLATES = PromptTemplates(
+    system_prompt="",
+    planning=PlanningPromptTemplate(
+        initial_facts="",
+        initial_plan="",
+        update_facts_pre_messages="",
+        update_facts_post_messages="",
+        update_plan_pre_messages="",
+        update_plan_post_messages="",
+    ),
+    managed_agent=ManagedAgentPromptTemplate(task="", report=""),
+    final_answer=FinalAnswerPromptTemplate(pre_messages="", post_messages=""),
+)
+
+
 class MultiStepAgent:
     """
     Agent class that solves the given task step by step, using the ReAct framework:
@@ -95,7 +174,7 @@ class MultiStepAgent:
     Args:
         tools (`list[Tool]`): [`Tool`]s that the agent can use.
         model (`Callable[[list[dict[str, str]]], ChatMessage]`): Model that will generate the agent's actions.
-        prompt_templates (`dict`, *optional*): Prompt templates.
+        prompt_templates ([`~agents.PromptTemplates`], *optional*): Prompt templates.
         max_steps (`int`, default `6`): Maximum number of steps the agent can take to solve the task.
         tool_parser (`Callable`, *optional*): Function used to parse the tool calls from the LLM output.
         add_base_tools (`bool`, default `False`): Whether to add the base tools to the agent's tools.
@@ -114,7 +193,7 @@ class MultiStepAgent:
         self,
         tools: List[Tool],
         model: Callable[[List[Dict[str, str]]], ChatMessage],
-        prompt_templates: Optional[dict] = None,
+        prompt_templates: Optional[PromptTemplates] = None,
         max_steps: int = 6,
         tool_parser: Optional[Callable] = None,
         add_base_tools: bool = False,
@@ -132,7 +211,7 @@ class MultiStepAgent:
             tool_parser = parse_json_tool_call
         self.agent_name = self.__class__.__name__
         self.model = model
-        self.prompt_templates = prompt_templates or {}
+        self.prompt_templates = prompt_templates or EMPTY_PROMPT_TEMPLATES
         self.max_steps = max_steps
         self.step_number: int = 0
         self.tool_parser = tool_parser
@@ -151,18 +230,19 @@ class MultiStepAgent:
                 )
             self.managed_agents = {agent.name: agent for agent in managed_agents}
 
+        tool_and_managed_agent_names = [tool.name for tool in tools]
+        if managed_agents is not None:
+            tool_and_managed_agent_names += [agent.name for agent in managed_agents]
+        if len(tool_and_managed_agent_names) != len(set(tool_and_managed_agent_names)):
+            raise ValueError(
+                "Each tool or managed_agent should have a unique name! You passed these duplicate names: "
+                f"{[name for name in tool_and_managed_agent_names if tool_and_managed_agent_names.count(name) > 1]}"
+            )
+
         for tool in tools:
             assert isinstance(tool, Tool), f"This element is not of class Tool: {str(tool)}"
-
-        duplicate_tool_names = [
-            name
-            for name, count in Counter([tool.name for tool in tools] + list(self.managed_agents.keys())).items()
-            if count > 1
-        ]
-        assert len(duplicate_tool_names) == 0, (
-            f"Each tool or managed_agent should have a unique name! You passed these duplicate names: {duplicate_tool_names}"
-        )
         self.tools = {tool.name: tool for tool in tools}
+
         if add_base_tools:
             for tool_name, tool_class in TOOL_MAPPING.items():
                 if tool_name != "python_interpreter" or self.__class__.__name__ == "ToolCallingAgent":
@@ -240,46 +320,33 @@ class MultiStepAgent:
         Returns:
             `str`: Final answer to the task.
         """
-        messages = [{"role": MessageRole.SYSTEM, "content": []}]
+        messages = [
+            {
+                "role": MessageRole.SYSTEM,
+                "content": [
+                    {
+                        "type": "text",
+                        "text": self.prompt_templates["final_answer"]["pre_messages"],
+                    }
+                ],
+            }
+        ]
         if images:
-            messages[0]["content"] = [
-                {
-                    "type": "text",
-                    "text": "An agent tried to answer a user query but it got stuck and failed to do so. You are tasked with providing an answer instead. Here is the agent's memory:",
-                }
-            ]
             messages[0]["content"].append({"type": "image"})
-            messages += self.write_memory_to_messages()[1:]
-            messages += [
-                {
-                    "role": MessageRole.USER,
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": f"Based on the above, please provide an answer to the following user request:\n{task}",
-                        }
-                    ],
-                }
-            ]
-        else:
-            messages[0]["content"] = [
-                {
-                    "type": "text",
-                    "text": "An agent tried to answer a user query but it got stuck and failed to do so. You are tasked with providing an answer instead. Here is the agent's memory:",
-                }
-            ]
-            messages += self.write_memory_to_messages()[1:]
-            messages += [
-                {
-                    "role": MessageRole.USER,
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": f"Based on the above, please provide an answer to the following user request:\n{task}",
-                        }
-                    ],
-                }
-            ]
+        messages += self.write_memory_to_messages()[1:]
+        messages += [
+            {
+                "role": MessageRole.USER,
+                "content": [
+                    {
+                        "type": "text",
+                        "text": populate_template(
+                            self.prompt_templates["final_answer"]["post_messages"], variables={"task": task}
+                        ),
+                    }
+                ],
+            }
+        ]
         try:
             chat_message: ChatMessage = self.model(messages)
             return chat_message.content
@@ -641,9 +708,9 @@ You have been provided with these additional arguments, that you can access usin
         self.memory.replay(self.logger, detailed=detailed)
 
     def __call__(self, task: str, **kwargs):
-        """
-        This method is called only by a manager agent.
-        Adds additional prompting for the managed agent, runs it, and wraps the output.
+        """Adds additional prompting for the managed agent, runs it, and wraps the output.
+
+        This method is called only by a managed agent.
         """
         full_task = populate_template(
             self.prompt_templates["managed_agent"]["task"],
@@ -661,16 +728,17 @@ You have been provided with these additional arguments, that you can access usin
             answer += "\n</summary_of_work>"
         return answer
 
-    def save(self, output_dir):
+    def save(self, output_dir: str, tool_file_name: str = "tool.py", make_gradio_app: bool = False):
         """
-        Saves the relevant code files for your agent so it can be pushed to the Hub. This will copy the code of your
-        agent in `output_dir` as well as autogenerate:
+        Saves the relevant code files for your agent. This will copy the code of your agent in `output_dir` as well as autogenerate:
 
-        - a `tools`folder containing the logic for each of the tools under `tools/{tool_name}.py`.
+        - a `tools` folder containing the logic for each of the tools under `tools/{tool_name}.py`.
+        - a `managed_agents` folder containing the logic for each of the managed agents.
         - an `agent.json` file containing a dictionary representing your agent.
         - a `prompt.yaml` file containing the prompt templates used by your agent.
-        - an `app.py` file providing an UI for your agent when it is exported to a Space with `agent.push_to_hub()`
-        - a `requirements.txt` containing the names of the module used by your tool (as detected when inspecting its
+        If you pass `make_gradio_app=True`, this will also write:
+        - an `app.py` file providing a UI for your agent when it is exported to a Space with `agent.push_to_hub()`
+        - a `requirements.txt` containing the names of the modules used by your tool (as detected when inspecting its
           code)
 
         Args:
@@ -679,18 +747,17 @@ You have been provided with these additional arguments, that you can access usin
         # Recursively saved managed agents
         if self.managed_agents:
             for agent_name, agent in self.managed_agents.items():
-                os.makedirs(f"{output_dir}/{agent_name}", exist_ok=True)
-                agent.save(f"{output_dir}/{agent_name}")
+                os.makedirs(os.path.join(output_dir, "managed_agents", agent_name), exist_ok=True)
+                agent.save(os.path.join(output_dir, "managed_agents", agent_name), make_gradio_app=False)
 
-        os.makedirs(f"{output_dir}/tools", exist_ok=True)
         class_name = self.__class__.__name__
 
         # Save tools to different .py files
         for tool in self.tools.values():
-            tool.save(output_dir, f"tools/{tool.name}.py")
+            tool.save(os.path.join(output_dir, "tools"), f"{tool.name}.py")
 
         # Save prompts to yaml
-        yaml_prompts = yaml.dump(
+        yaml_prompts = yaml.safe_dump(
             self.prompt_templates,
             default_style="|",  # This forces block literals for all strings
             default_flow_style=False,
@@ -707,86 +774,88 @@ You have been provided with these additional arguments, that you can access usin
         agent_dict = self.to_dict()
         agent_dict["tools"] = [tool.name for tool in self.tools.values()]
         with open(os.path.join(output_dir, "agent.json"), "w", encoding="utf-8") as f:
-            f.write(json.dumps(agent_dict, indent=4))
+            json.dump(agent_dict, f, indent=4)
 
-        # Save requirements
-        requirements_file = os.path.join(output_dir, "requirements.txt")
-        requirements = set()
-        if hasattr(self, "authorized_imports"):
-            requirements.update(
-                set(
-                    package.split(".")[0] for package in self.authorized_imports if package not in BASE_BUILTIN_MODULES
+        if make_gradio_app:
+            # Save requirements
+            with open(os.path.join(output_dir, "requirements.txt"), "w", encoding="utf-8") as f:
+                f.writelines(f"{r}\n" for r in agent_dict["requirements"])
+
+            # Make agent.py file with Gradio UI
+            agent_name = f"agent_{self.name}" if getattr(self, "name", None) else "agent"
+            app_template = textwrap.dedent("""
+                import yaml
+                from smolagents import GradioUI, {{ class_name }}, {{ agent_dict['model']['class'] }}
+
+                {% for tool in tools.values() -%}
+                from tools.{{ tool.name }} import {{ tool.__class__.__name__ }} as {{ tool.name | camelcase }}
+                {% endfor %}
+                {% for managed_agent in managed_agents.values() -%}
+                from managed_agents.{{ managed_agent.name }}.app import agent_{{ managed_agent.name }}
+                {% endfor %}
+
+                model = {{ agent_dict['model']['class'] }}(
+                {% for key in agent_dict['model']['data'] if key not in ['class', 'last_input_token_count', 'last_output_token_count'] -%}
+                    {{ key }}={{ agent_dict['model']['data'][key]|repr }},
+                {% endfor %})
+
+                {% for tool in tools.values() -%}
+                {{ tool.name }} = {{ tool.name | camelcase }}()
+                {% endfor %}
+
+                with open("prompts.yaml", 'r') as stream:
+                    prompt_templates = yaml.safe_load(stream)
+
+                {{ agent_name }} = {{ class_name }}(
+                    model=model,
+                    tools=[{% for tool_name in tools.keys() if tool_name != "final_answer" %}{{ tool_name }}{% if not loop.last %}, {% endif %}{% endfor %}],
+                    managed_agents=[{% for subagent_name in managed_agents.keys() %}agent_{{ subagent_name }}{% if not loop.last %}, {% endif %}{% endfor %}],
+                    {% for attribute_name, value in agent_dict.items() if attribute_name not in ["model", "tools", "prompt_templates", "authorized_imports", "managed_agents"] -%}
+                    {{ attribute_name }}={{ value|repr }},
+                    {% endfor %}prompt_templates=prompt_templates
                 )
+                if __name__ == "__main__":
+                    GradioUI({{ agent_name }}).launch()
+                """).strip()
+            template_env = jinja2.Environment(loader=jinja2.BaseLoader(), undefined=jinja2.StrictUndefined)
+            template_env.filters["repr"] = repr
+            template_env.filters["camelcase"] = lambda value: "".join(word.capitalize() for word in value.split("_"))
+            template = template_env.from_string(app_template)
+
+            # Render the app.py file from Jinja2 template
+            app_text = template.render(
+                {
+                    "agent_name": agent_name,
+                    "class_name": class_name,
+                    "agent_dict": agent_dict,
+                    "tools": self.tools,
+                    "managed_agents": self.managed_agents,
+                }
             )
-        for tool in self.tools.values():
-            requirements.update(set(tool.to_dict()["requirements"]))
 
-        with open(requirements_file, "w", encoding="utf-8") as f:
-            f.write("\n".join(requirements) + "\n")
-
-        # Make agent.py file with Gradio UI
-        agent_name = "agent_" + self.name if hasattr(self, "name") and self.name else "agent"
-        app_template = textwrap.dedent("""
-            import yaml
-            from smolagents import GradioUI, {{ class_name }}, {{ agent_dict['model']['class'] }}
-
-            {% for tool in tools.values() -%}
-            from tools.{{ tool.name }} import {{ tool.__class__.__name__ }}
-            {% endfor %}
-            {% for managed_agent in managed_agents.values() -%}
-            from {{ managed_agent.name }}.app import agent_{{ managed_agent.name }}
-            {% endfor %}
-
-            model = {{ agent_dict['model']['class'] }}(
-            {% for key in agent_dict['model']['data'] if key not in ['class', 'last_input_token_count', 'last_output_token_count'] -%}
-                {{ key }}={{ agent_dict['model']['data'][key]|repr }},
-            {% endfor %})
-
-            {% for tool in tools.values() -%}
-            {{ tool.name }} = {{ tool.__class__.__name__ }}()
-            {% endfor %}
-
-            with open("prompts.yaml", 'r') as stream:
-                prompt_templates = yaml.safe_load(stream)
-
-            {{ agent_name }} = {{ class_name }}(
-                model=model,
-                tools=[{% for tool_name in tools.keys() if tool_name != "final_answer" %}{{ tool_name }}{% if not loop.last %}, {% endif %}{% endfor %}],
-                managed_agents=[{% for subagent_name in managed_agents.keys() %}agent_{{ subagent_name }}{% if not loop.last %}, {% endif %}{% endfor %}],
-                {% for attribute_name, value in agent_dict.items() if attribute_name not in ["model", "tools", "prompt_templates", "authorized_imports", "managed_agents"] -%}
-                {{ attribute_name }}={{ value|repr }},
-                {% endfor %}prompt_templates=prompt_templates
-            )
-            if __name__ == "__main__":
-                GradioUI({{ agent_name }}).launch()
-            """).strip()
-        template_env = jinja2.Environment(loader=jinja2.BaseLoader(), undefined=jinja2.StrictUndefined)
-        template_env.filters["repr"] = repr
-        template = template_env.from_string(app_template)
-
-        # Render the app.py file from Jinja2 template
-        app_text = template.render(
-            {
-                "agent_name": agent_name,
-                "class_name": class_name,
-                "agent_dict": agent_dict,
-                "tools": self.tools,
-                "managed_agents": self.managed_agents,
-            }
-        )
-
-        with open(os.path.join(output_dir, "app.py"), "w", encoding="utf-8") as f:
-            f.write(app_text + "\n")  # Append newline at the end
+            with open(os.path.join(output_dir, "app.py"), "w", encoding="utf-8") as f:
+                f.write(app_text + "\n")  # Append newline at the end
 
     def to_dict(self) -> Dict[str, Any]:
         """Converts agent into a dictionary."""
         # TODO: handle serializing step_callbacks and final_answer_checks
         for attr in ["final_answer_checks", "step_callbacks"]:
-            if getattr(self, "final_answer_checks", None) is not None and len(self.final_answer_checks) > 0:
+            if getattr(self, attr, None):
                 self.logger.log(f"This agent has {attr}: they will be ignored by this method.", LogLevel.INFO)
 
+        tool_dicts = [tool.to_dict() for tool in self.tools.values()]
+        tool_requirements = {req for tool in self.tools.values() for req in tool.to_dict()["requirements"]}
+        managed_agents_requirements = {
+            req for managed_agent in self.managed_agents.values() for req in managed_agent.to_dict()["requirements"]
+        }
+        requirements = tool_requirements | managed_agents_requirements
+        if hasattr(self, "authorized_imports"):
+            requirements.update(
+                {package.split(".")[0] for package in self.authorized_imports if package not in BASE_BUILTIN_MODULES}
+            )
+
         agent_dict = {
-            "tools": [tool.to_dict() for tool in self.tools.values()],
+            "tools": tool_dicts,
             "model": {
                 "class": self.model.__class__.__name__,
                 "data": self.model.to_dict(),
@@ -801,6 +870,7 @@ You have been provided with these additional arguments, that you can access usin
             "planning_interval": self.planning_interval,
             "name": self.name,
             "description": self.description,
+            "requirements": list(requirements),
         }
         if hasattr(self, "authorized_imports"):
             agent_dict["authorized_imports"] = self.authorized_imports
@@ -831,7 +901,7 @@ You have been provided with these additional arguments, that you can access usin
             token (`str`, *optional*):
                 The token to identify you on hf.co. If unset, will use the token generated when running
                 `huggingface-cli login` (stored in `~/.huggingface`).
-            trust_remote_code(`str`, *optional*, defaults to False):
+            trust_remote_code(`bool`, *optional*, defaults to False):
                 This flags marks that you understand the risk of running remote code and that you trust this tool.
                 If not setting this to True, loading the tool from Hub will fail.
             kwargs (additional keyword arguments, *optional*):
@@ -844,7 +914,7 @@ You have been provided with these additional arguments, that you can access usin
                 "Loading an agent from Hub requires to acknowledge you trust its code: to do so, pass `trust_remote_code=True`."
             )
 
-        # Get the agents's Hub folder.
+        # Get the agent's Hub folder.
         download_kwargs = {"token": token, "repo_type": "space"} | {
             key: kwargs.pop(key)
             for key in [
@@ -870,9 +940,9 @@ You have been provided with these additional arguments, that you can access usin
 
         # Recursively get managed agents
         managed_agents = []
-        for managed_agent_name in agent_dict["managed_agents"]:
-            agent_cls = globals()[agent_dict["managed_agents"][managed_agent_name]]
-            managed_agents.append(agent_cls.from_folder(folder / managed_agent_name))
+        for managed_agent_name, managed_agent_class in agent_dict["managed_agents"].items():
+            agent_cls = getattr(importlib.import_module("smolagents.agents"), managed_agent_class)
+            managed_agents.append(agent_cls.from_folder(folder / "managed_agents" / managed_agent_name))
 
         tools = []
         for tool_name in agent_dict["tools"]:
@@ -893,7 +963,6 @@ You have been provided with these additional arguments, that you can access usin
             grammar=agent_dict["grammar"],
             verbosity_level=agent_dict["verbosity_level"],
         )
-        print("KKKK", cls.__name__, agent_dict)
         if cls.__name__ == "CodeAgent":
             args["additional_authorized_imports"] = agent_dict["authorized_imports"]
         return cls(**args)
@@ -901,7 +970,7 @@ You have been provided with these additional arguments, that you can access usin
     def push_to_hub(
         self,
         repo_id: str,
-        commit_message: str = "Upload tool",
+        commit_message: str = "Upload agent",
         private: Optional[bool] = None,
         token: Optional[Union[bool, str]] = None,
         create_pr: bool = False,
@@ -913,15 +982,15 @@ You have been provided with these additional arguments, that you can access usin
             repo_id (`str`):
                 The name of the repository you want to push to. It should contain your organization name when
                 pushing to a given organization.
-            commit_message (`str`, *optional*, defaults to `"Upload tool"`):
+            commit_message (`str`, *optional*, defaults to `"Upload agent"`):
                 Message to commit while pushing.
-            private (`bool`, *optional*):
-                Whether to make the repo private. If `None` (default), the repo will be public unless the organization's default is private. This value is ignored if the repo already exists.
+            private (`bool`, *optional*, defaults to `None`):
+                Whether to make the repo private. If `None`, the repo will be public unless the organization's default is private. This value is ignored if the repo already exists.
             token (`bool` or `str`, *optional*):
                 The token to use as HTTP bearer authorization for remote files. If unset, will use the token generated
                 when running `huggingface-cli login` (stored in `~/.huggingface`).
             create_pr (`bool`, *optional*, defaults to `False`):
-                Whether or not to create a PR with the uploaded files or directly commit.
+                Whether to create a PR with the uploaded files or directly commit.
         """
         repo_url = create_repo(
             repo_id=repo_id,
@@ -934,14 +1003,14 @@ You have been provided with these additional arguments, that you can access usin
         repo_id = repo_url.repo_id
         metadata_update(
             repo_id,
-            {"tags": ["smolagents", "agent", "smolagent", "tool"]},
+            {"tags": ["smolagents", "agent"]},
             repo_type="space",
             token=token,
             overwrite=True,
         )
 
         with tempfile.TemporaryDirectory() as work_dir:
-            self.save(work_dir)
+            self.save(work_dir, make_gradio_app=True)
             logger.info(f"Uploading the following files to {repo_id}: {','.join(os.listdir(work_dir))}")
             return upload_folder(
                 repo_id=repo_id,
@@ -960,7 +1029,7 @@ class ToolCallingAgent(MultiStepAgent):
     Args:
         tools (`list[Tool]`): [`Tool`]s that the agent can use.
         model (`Callable[[list[dict[str, str]]], ChatMessage]`): Model that will generate the agent's actions.
-        prompt_templates (`dict`, *optional*): Prompt templates.
+        prompt_templates ([`~agents.PromptTemplates`], *optional*): Prompt templates.
         planning_interval (`int`, *optional*): Interval at which the agent will run a planning step.
         **kwargs: Additional keyword arguments.
     """
@@ -969,7 +1038,7 @@ class ToolCallingAgent(MultiStepAgent):
         self,
         tools: List[Tool],
         model: Callable[[List[Dict[str, str]]], ChatMessage],
-        prompt_templates: Optional[dict] = None,
+        prompt_templates: Optional[PromptTemplates] = None,
         planning_interval: Optional[int] = None,
         **kwargs,
     ):
@@ -1082,7 +1151,7 @@ class CodeAgent(MultiStepAgent):
     Args:
         tools (`list[Tool]`): [`Tool`]s that the agent can use.
         model (`Callable[[list[dict[str, str]]], ChatMessage]`): Model that will generate the agent's actions.
-        prompt_templates (`dict`, *optional*): Prompt templates.
+        prompt_templates ([`~agents.PromptTemplates`], *optional*): Prompt templates.
         grammar (`dict[str, str]`, *optional*): Grammar used to parse the LLM output.
         additional_authorized_imports (`list[str]`, *optional*): Additional authorized imports for the agent.
         planning_interval (`int`, *optional*): Interval at which the agent will run a planning step.
@@ -1096,7 +1165,7 @@ class CodeAgent(MultiStepAgent):
         self,
         tools: List[Tool],
         model: Callable[[List[Dict[str, str]]], ChatMessage],
-        prompt_templates: Optional[dict] = None,
+        prompt_templates: Optional[PromptTemplates] = None,
         grammar: Optional[Dict[str, str]] = None,
         additional_authorized_imports: Optional[List[str]] = None,
         planning_interval: Optional[int] = None,
@@ -1250,6 +1319,3 @@ class CodeAgent(MultiStepAgent):
         self.logger.log(Group(*execution_outputs_console), level=LogLevel.INFO)
         memory_step.action_output = output
         return output if is_final_answer else None
-
-
-__all__ = ["MultiStepAgent", "CodeAgent", "ToolCallingAgent", "AgentMemory"]

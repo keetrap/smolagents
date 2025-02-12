@@ -146,7 +146,7 @@ def test_e2e_class_tool_save():
 
     test_tool = TestTool()
     with tempfile.TemporaryDirectory() as tmp_dir:
-        test_tool.save(tmp_dir)
+        test_tool.save(tmp_dir, make_gradio_app=True)
         assert set(os.listdir(tmp_dir)) == {"requirements.txt", "app.py", "tool.py"}
         assert (
             pathlib.Path(tmp_dir, "tool.py").read_text()
@@ -201,7 +201,7 @@ def test_e2e_ipython_class_tool_save():
                 import IPython  # noqa: F401
 
                 return task
-        TestTool().save("{tmp_dir}")
+        TestTool().save("{tmp_dir}", make_gradio_app=True)
     """)
         assert shell.run_cell(code_blob, store_history=True).success
         assert set(os.listdir(tmp_dir)) == {"requirements.txt", "app.py", "tool.py"}
@@ -254,7 +254,7 @@ def test_e2e_function_tool_save():
         return task
 
     with tempfile.TemporaryDirectory() as tmp_dir:
-        test_tool.save(tmp_dir)
+        test_tool.save(tmp_dir, make_gradio_app=True)
         assert set(os.listdir(tmp_dir)) == {"requirements.txt", "app.py", "tool.py"}
         assert (
             pathlib.Path(tmp_dir, "tool.py").read_text()
@@ -310,7 +310,7 @@ def test_e2e_ipython_function_tool_save():
 
             return task
 
-        test_tool.save("{tmp_dir}")
+        test_tool.save("{tmp_dir}", make_gradio_app=True)
         """)
         assert shell.run_cell(code_blob, store_history=True).success
         assert set(os.listdir(tmp_dir)) == {"requirements.txt", "app.py", "tool.py"}

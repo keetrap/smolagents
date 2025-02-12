@@ -50,10 +50,10 @@ def get_imports(code: str) -> List[str]:
     Extracts all the libraries (not relative imports) that are imported in a code.
 
     Args:
-        filename (`str` or `os.PathLike`): The module file to inspect.
+        code (`str`): Code text to inspect.
 
     Returns:
-        `List[str]`: The list of all packages required to use the input module.
+        `list[str]`: List of all packages required to use the input code.
     """
     # filter out try/except block so in custom code we can have try/except imports
     code = re.sub(r"\s*try\s*:.*?except.*?:", "", code, flags=re.DOTALL)
@@ -66,8 +66,8 @@ def get_imports(code: str) -> List[str]:
         flags=re.MULTILINE,
     )
 
-    # Imports of the form `import xxx`
-    imports = re.findall(r"^\s*import\s+(\S+)\s*$", code, flags=re.MULTILINE)
+    # Imports of the form `import xxx` or `import xxx as yyy`
+    imports = re.findall(r"^\s*import\s+(\S+?)(?:\s+as\s+\S+)?\s*$", code, flags=re.MULTILINE)
     # Imports of the form `from xxx import yyy`
     imports += re.findall(r"^\s*from\s+(\S+)\s+import", code, flags=re.MULTILINE)
     # Only keep the top-level module

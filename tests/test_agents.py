@@ -29,6 +29,7 @@ from smolagents.agents import (
     MultiStepAgent,
     ToolCall,
     ToolCallingAgent,
+    populate_template,
 )
 from smolagents.default_tools import DuckDuckGoSearchTool, PythonInterpreterTool, VisitWebpageTool
 from smolagents.memory import PlanningStep
@@ -436,11 +437,11 @@ class AgentTests(unittest.TestCase):
         assert len(agent.tools) == 1  # when no tools are provided, only the final_answer tool is added by default
 
         toolset_2 = [PythonInterpreterTool(), PythonInterpreterTool()]
-        with pytest.raises(AssertionError) as e:
+        with pytest.raises(ValueError) as e:
             agent = CodeAgent(tools=toolset_2, model=fake_code_model)
         assert "Each tool or managed_agent should have a unique name!" in str(e)
 
-        with pytest.raises(AssertionError) as e:
+        with pytest.raises(ValueError) as e:
             agent.name = "python_interpreter"
             agent.description = "empty"
             CodeAgent(tools=[PythonInterpreterTool()], model=fake_code_model, managed_agents=[agent])
@@ -651,6 +652,94 @@ class TestMultiStepAgent:
                     assert "type" in content
                     assert "text" in content
 
+    @pytest.mark.parametrize(
+        "images, expected_messages_list",
+        [
+            (
+                None,
+                [
+                    [
+                        {
+                            "role": MessageRole.SYSTEM,
+                            "content": [{"type": "text", "text": "FINAL_ANSWER_SYSTEM_PROMPT"}],
+                        },
+                        {"role": MessageRole.USER, "content": [{"type": "text", "text": "FINAL_ANSWER_USER_PROMPT"}]},
+                    ]
+                ],
+            ),
+            (
+                ["image1.png"],
+                [
+                    [
+                        {
+                            "role": MessageRole.SYSTEM,
+                            "content": [{"type": "text", "text": "FINAL_ANSWER_SYSTEM_PROMPT"}, {"type": "image"}],
+                        },
+                        {"role": MessageRole.USER, "content": [{"type": "text", "text": "FINAL_ANSWER_USER_PROMPT"}]},
+                    ]
+                ],
+            ),
+        ],
+    )
+    def test_provide_final_answer(self, images, expected_messages_list):
+        fake_model = MagicMock()
+        fake_model.return_value.content = "Final answer."
+        agent = CodeAgent(
+            tools=[],
+            model=fake_model,
+        )
+        task = "Test task"
+        final_answer = agent.provide_final_answer(task, images=images)
+        expected_message_texts = {
+            "FINAL_ANSWER_SYSTEM_PROMPT": agent.prompt_templates["final_answer"]["pre_messages"],
+            "FINAL_ANSWER_USER_PROMPT": populate_template(
+                agent.prompt_templates["final_answer"]["post_messages"], variables=dict(task=task)
+            ),
+        }
+        for expected_messages in expected_messages_list:
+            for expected_message in expected_messages:
+                for expected_content in expected_message["content"]:
+                    if "text" in expected_content:
+                        expected_content["text"] = expected_message_texts[expected_content["text"]]
+        assert final_answer == "Final answer."
+        # Test calls to model
+        assert len(fake_model.call_args_list) == 1
+        for call_args, expected_messages in zip(fake_model.call_args_list, expected_messages_list):
+            assert len(call_args.args) == 1
+            messages = call_args.args[0]
+            assert isinstance(messages, list)
+            assert len(messages) == len(expected_messages)
+            for message, expected_message in zip(messages, expected_messages):
+                assert isinstance(message, dict)
+                assert "role" in message
+                assert "content" in message
+                assert message["role"] in MessageRole.__members__.values()
+                assert message["role"] == expected_message["role"]
+                assert isinstance(message["content"], list)
+                assert len(message["content"]) == len(expected_message["content"])
+                for content, expected_content in zip(message["content"], expected_message["content"]):
+                    assert content == expected_content
+
+
+class TestCodeAgent:
+    @pytest.mark.parametrize("provide_run_summary", [False, True])
+    def test_call_with_provide_run_summary(self, provide_run_summary):
+        agent = CodeAgent(tools=[], model=MagicMock(), provide_run_summary=provide_run_summary)
+        assert agent.provide_run_summary is provide_run_summary
+        agent.managed_agent_prompt = "Task: {task}"
+        agent.name = "test_agent"
+        agent.run = MagicMock(return_value="Test output")
+        agent.write_memory_to_messages = MagicMock(return_value=[{"content": "Test summary"}])
+
+        result = agent("Test request")
+        expected_summary = "Here is the final answer from your managed agent 'test_agent':\nTest output"
+        if provide_run_summary:
+            expected_summary += (
+                "\n\nFor more detail, find below a summary of this agent's work:\n"
+                "<summary_of_work>\n\nTest summary\n---\n</summary_of_work>"
+            )
+        assert result == expected_summary
+
 
 class MultiAgentsTests(unittest.TestCase):
     def test_multiagents_save(self):
@@ -670,13 +759,44 @@ class MultiAgentsTests(unittest.TestCase):
             additional_authorized_imports=["pandas", "datetime"],
             managed_agents=[web_agent, code_agent],
         )
-        agent.save("agent_export")
+        agent.save("agent_export", make_gradio_app=True)
+
+        expected_structure = {
+            "managed_agents": {
+                "useless": {"tools": {"files": ["final_answer.py"]}, "files": ["agent.json", "prompts.yaml"]},
+                "web_agent": {
+                    "tools": {"files": ["final_answer.py", "visit_webpage.py", "web_search.py"]},
+                    "files": ["agent.json", "prompts.yaml"],
+                },
+            },
+            "tools": {"files": ["final_answer.py"]},
+            "files": ["app.py", "requirements.txt", "agent.json", "prompts.yaml"],
+        }
+
+        def verify_structure(current_path: Path, structure: dict):
+            for dir_name, contents in structure.items():
+                if dir_name != "files":
+                    # For directories, verify they exist and recurse into them
+                    dir_path = current_path / dir_name
+                    assert dir_path.exists(), f"Directory {dir_path} does not exist"
+                    assert dir_path.is_dir(), f"{dir_path} is not a directory"
+                    verify_structure(dir_path, contents)
+                else:
+                    # For files, verify each exists in the current path
+                    for file_name in contents:
+                        file_path = current_path / file_name
+                        assert file_path.exists(), f"File {file_path} does not exist"
+                        assert file_path.is_file(), f"{file_path} is not a file"
+
+        verify_structure(Path("agent_export"), expected_structure)
+
+        # Test that re-loaded agents work as expected.
         agent2 = CodeAgent.from_folder("agent_export")
         assert set(agent2.authorized_imports) == set(["pandas", "datetime"] + BASE_BUILTIN_MODULES)
         assert (
             agent2.managed_agents["web_agent"].tools["web_search"].max_results == 10
         )  # For now tool init parameters are forgotten
-        assert agent2.model.kwargs["temperature"] == 0.5
+        assert agent2.model.kwargs["temperature"] == pytest.approx(0.5)
 
     def test_multiagents(self):
         class FakeModelMultiagentsManagerAgent:

@@ -344,10 +344,8 @@ class Model:
             "temperature",
             "max_tokens",
             "provider",
-            "token",
             "timeout",
             "api_base",
-            "api_key",
             "torch_dtype",
             "device_map",
             "organization",
@@ -356,6 +354,13 @@ class Model:
         ]:
             if hasattr(self, attribute):
                 model_dictionary[attribute] = getattr(self, attribute)
+
+        dangerous_attributes = ["token", "api_key"]
+        for attribute_name in dangerous_attributes:
+            if hasattr(self, attribute_name):
+                print(
+                    f"For security reasons, we do not export the `{attribute_name}` attribute of your model. Please export it manually."
+                )
         return model_dictionary
 
     @classmethod

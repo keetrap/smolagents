@@ -146,7 +146,8 @@ class MethodChecker(ast.NodeVisitor):
 def validate_tool_attributes(cls, check_imports: bool = True) -> None:
     """
     Validates that a Tool class follows the proper patterns:
-    0. __init__ takes no argument (args chosen at init are not traceable so we cannot rebuild the source code for them, make them class attributes!).
+    0. Any argument of __init__ should have a default.
+    Args chosen at init are not traceable, so we cannot rebuild the source code for them, thus any important arg should be defined as a class attribute.
     1. About the class:
         - Class attributes should only be strings or dicts
         - Class attributes cannot be complex attributes

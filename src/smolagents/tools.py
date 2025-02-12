@@ -263,19 +263,21 @@ class Tool:
 
         return {"name": self.name, "code": tool_code, "requirements": requirements}
 
-    def save(self, output_dir, tool_file_name: str = "tool.py"):
+    def save(self, output_dir: str, tool_file_name: str = "tool.py", make_gradio_app: bool = False):
         """
         Saves the relevant code files for your tool so it can be pushed to the Hub. This will copy the code of your
         tool in `output_dir` as well as autogenerate:
 
-        - a `tool.py` file containing the logic for your tool.
-        - an `app.py` file providing an UI for your tool when it is exported to a Space with `tool.push_to_hub()`
-        - a `requirements.txt` containing the names of the module used by your tool (as detected when inspecting its
+        - a `{tool_file_name}.py` file containing the logic for your tool.
+        If you pass `make_gradio_app=True`, this will also write:
+        - an `app.py` file providing a UI for your tool when it is exported to a Space with `tool.push_to_hub()`
+        - a `requirements.txt` containing the names of the modules used by your tool (as detected when inspecting its
           code)
 
         Args:
             output_dir (`str`): The folder in which you want to save your tool.
-            tool_file_name (`str`): The file name in which you want to save your tool.
+            tool_file_name (`str`, *optional*): The file name in which you want to save your tool.
+            make_gradio_app (`bool`, *optional*, defaults to False): Whether to also export a `requirements.txt` file and Gradio UI.
         """
         os.makedirs(output_dir, exist_ok=True)
         class_name = self.__class__.__name__
@@ -287,26 +289,27 @@ class Tool:
         with open(tool_file, "w", encoding="utf-8") as f:
             f.write(tool_code.replace(":true,", ":True,").replace(":true}", ":True}"))
 
-        # Save app file
-        app_file = os.path.join(output_dir, "app.py")
-        with open(app_file, "w", encoding="utf-8") as f:
-            f.write(
-                textwrap.dedent(
-                    f"""
-            from smolagents import launch_gradio_demo
-            from tool import {class_name}
+        if make_gradio_app:
+            # Save app file
+            app_file = os.path.join(output_dir, "app.py")
+            with open(app_file, "w", encoding="utf-8") as f:
+                f.write(
+                    textwrap.dedent(
+                        f"""
+                from smolagents import launch_gradio_demo
+                from {tool_file_name} import {class_name}
 
-            tool = {class_name}()
+                tool = {class_name}()
 
-            launch_gradio_demo(tool)
-            """
-                ).lstrip()
-            )
+                launch_gradio_demo(tool)
+                """
+                    ).lstrip()
+                )
 
-        # Save requirements file
-        requirements_file = os.path.join(output_dir, "requirements.txt")
-        with open(requirements_file, "w", encoding="utf-8") as f:
-            f.write("\n".join(tool_dict["requirements"]) + "\n")
+            # Save requirements file
+            requirements_file = os.path.join(output_dir, "requirements.txt")
+            with open(requirements_file, "w", encoding="utf-8") as f:
+                f.write("\n".join(tool_dict["requirements"]) + "\n")
 
     def push_to_hub(
         self,
@@ -342,9 +345,7 @@ class Tool:
             space_sdk="gradio",
         )
         repo_id = repo_url.repo_id
-        metadata_update(
-            repo_id, {"tags": ["smolagents", "agent", "smolagent", "tool"]}, repo_type="space", token=token
-        )
+        metadata_update(repo_id, {"tags": ["smolagents", "tool"]}, repo_type="space", token=token)
 
         with tempfile.TemporaryDirectory() as work_dir:
             # Save all files.
@@ -394,7 +395,7 @@ class Tool:
         """
         if not trust_remote_code:
             raise ValueError(
-                "Loading an tool from Hub requires to acknowledge you trust its code: to do so, pass `trust_remote_code=True`."
+                "Loading a tool from Hub requires to acknowledge you trust its code: to do so, pass `trust_remote_code=True`."
             )
 
         # Get the tool's tool.py file.
@@ -419,16 +420,17 @@ class Tool:
     def from_code(cls, tool_code: str, **kwargs):
         module = types.ModuleType("dynamic_tool")
 
-        print(tool_code)
-
         exec(tool_code, module.__dict__)
 
         # Find the Tool subclass
-        tool_class = None
-        for item in module.__dict__.values():
-            if isinstance(item, type) and issubclass(item, Tool) and item != Tool:
-                tool_class = item
-                break
+        tool_class = next(
+            (
+                obj
+                for _, obj in inspect.getmembers(module, inspect.isclass)
+                if issubclass(obj, Tool) and obj is not Tool
+            ),
+            None,
+        )
 
         if tool_class is None:
             raise ValueError("No Tool subclass found in the code.")
